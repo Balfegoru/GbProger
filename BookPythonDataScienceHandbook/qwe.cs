@@ -4,17 +4,100 @@
 @using System.Linq
 @using Resto.Front.PrintTemplates.Cheques.Razor
 @using Resto.Front.PrintTemplates.Cheques.Razor.TemplateModels
-@using System.Text.RegularExpressions;
+@using System.Text.RegularExpressions
 
 @inherits TemplateBase<IBillCheque>
 @{
     var order = Model.Order;
+var group = Model.CommonInfo.Group.Name;
+    var section = order.Table.Section.Name;
+    var terminal = Model.CommonInfo.CurrentTerminal;
+    var transliterationMap = new Dictionary<string, string> {
+        {"а", "a"},  {"б", "b"},  {"в", "v"},  {"г", "g"}, {"д", "d"},
+        {"е", "e"},  {"ё", "e"},  {"ж", "zh"}, {"з", "z"}, {"и", "i"},
+        {"й", "y"},  {"к", "k"},  {"л", "l"},  {"м", "m"}, {"н", "n"},
+        {"о", "o"},  {"п", "p"},  {"р", "r"},  {"с", "s"}, {"т", "t"},
+        {"у", "y"},  {"ф", "ph"}, {"х", "h"},  {"ц", "c"}, {"ч", "ch"},
+        {"ш", "sh"}, {"щ", "sh"}, {"ы", "i"},  {"э", "e"}, {"ю", "u"},
+        {"я", "ya"}, {"a", "a"},  {"b", "b"},  {"c", "c"}, {"d", "d"},
+        {"e", "e"},  {"f", "f"},  {"g", "g"},  {"h", "h"}, {"i", "i"},
+        {"j", "j"},  {"k", "k"},  {"l", "l"},  {"m", "m"}, {"n", "n"},
+        {"o", "o"},  {"p", "p"},  {"q", "q"},  {"r", "r"}, {"s", "s"},
+        {"t", "t"},  {"u", "u"},  {"v", "v"},  {"w", "w"}, {"x", "x"},
+        {"y", "y"},  {"z", "z"}
+        };
 
-    var waiterFullName = order.Waiter.GetNameOrEmpty();
-    var match = Regex.Match(order.Waiter.GetNameOrEmpty(), @"\d");
-    var waiterName = string.Empty;
-    var waiterCode = string.Empty;
-    var fullSum = GetOrderSum(order);
+    var transliteratedName = string.Concat(order.Waiter.GetNameOrEmpty().ToLower().Select(c => {
+        string saveString;
+    if (transliterationMap.TryGetValue(c.ToString(), out saveString)) {
+        return saveString;
+        } else {
+            return "_";
+            }
+            }));
+
+    var fullSum = order.GetFullSum() - order.DiscountItems.Where(di => !di.Type.PrintProductItemInPrecheque).Sum(di => di.GetDiscountSum());
+
+    var urls = new Dictionary<string, string> {
+        {"source", "?o=3"},
+        {"sum", string.Concat("&s=", fullSum)},
+        {"number", string.Concat("&c=", order.Number)},
+        {"table", string.Concat("&tn=", order.Table.Number)},
+        {"name", string.Concat("&en=", transliteratedName)},
+        {"guid", string.Concat("&checkout=", order.OrderId)},
+        {"wp", "&wpid="}
+        };
+
+    var code = "XXXXXX";         // код заведения
+    var wpid = "XXXXXXX";        // WPID
+                                 //
+    bool useGroupCode = false;   // true для группового кода
+    bool qrPayOn = true;         // true для QR-pay
+    bool useGrouping = false;    // true для разделения по группам
+
+    // groupDictionary заполняется только при useGrouping = true
+    // указать имя группы вместо "Группа 1", "Группа 2" и тд.
+    var groupDictionary = new Dictionary<string, Tuple<string, string, bool, bool>> {        
+        {"Группа 1", Tuple.Create(
+            "XXXXXX",    // код заведения
+            "XXXXXXX",   // WPID
+            false,       // true для группового кода
+            false        // true для QR-pay
+            )},
+        {"Группа 2", Tuple.Create(
+            "XXXXXX",    // код заведения
+            "XXXXXXX",   // WPID
+            false,       // true для группового кода
+            false        // true для QR-pay
+            )}
+        };
+
+    var netmonetHeader = "Отзывы и чаевые";
+    var url = "https://netmonet.co/tip/";    
+    var urlParams = string.Concat(urls["source"], urls["sum"], urls["number"], urls["table"], urls["name"]);
+
+    if (useGrouping && groupDictionary.ContainsKey(group)) {
+        code = groupDictionary[group].Item1;
+        wpid = groupDictionary[group].Item2;
+        useGroupCode = groupDictionary[group].Item3;
+        qrPayOn = groupDictionary[group].Item4;
+        }
+
+    var codeMatches = Regex.Match(order.Waiter.GetNameOrEmpty(), ".*(\\d{6}).*");
+    bool codeFound = codeMatches.Groups.Count == 2;
+    if (codeFound) {
+        code = codeMatches.Groups[1].Value;
+        urlParams = string.Concat(urls["source"], urls["sum"], urls["number"], urls["table"]);
+        }
+
+    if (useGroupCode && !codeFound) {
+        url = string.Concat(url, "group/");
+        }
+
+    if (qrPayOn) {
+        netmonetHeader = "Оплатить счет," + "\n" + "оставить чаевые и отзыв";
+        urlParams = string.Concat(urlParams, urls["guid"]);
+        }
 
 }
 
@@ -44,7 +127,7 @@
     {
         <left>@string.Format(Resources.AdditionalServiceHeaderOrderItemsAddedPattern, FormatLongDateTime(Model.CommonInfo.CurrentTime))</left>
     }
-    <left>@string.Format(Resources.BillHeaderWaiterPattern, order.Waiter.GetNameOrEmpty())</left>
+      <left>@string.Format(Resources.BillHeaderWaiterPattern, @Regex.Replace(order.Waiter.GetNameOrEmpty(), "\\d{6}", ""))</left>
 
     @foreach (var clientInfo in
         from discountItem in order.DiscountItems
@@ -91,25 +174,20 @@
 
     @* Footer (begin) *@
     <np />
+      @* Netmonet (begin) *@
+    @if (!useGrouping || groupDictionary.ContainsKey(group)) {
+      <f2> <split><center>@netmonetHeader</center></split> </f2>
+        <np />
+        <qrcode size="small" correction="low">@url@code@urlParams@urls["wp"]@wpid</qrcode>
+        <np />
+        <center>@("Наведите камеру на QR-код")</center>
+        <center>@("или введите " + @code + " на netmonet.co")</center>
+        }
+    @* Netmonet (end) *@
     @if (Model.AdditionalServiceChequeInfo == null)
     {
         <whitespace-preserve>@Raw(string.Join(Environment.NewLine, Model.Extensions.BeforeFooter))</whitespace-preserve>
     }
-
-
-    @if (waiterFullName.Contains('_') && match.Success)
-    {
-        waiterName = waiterFullName.Split('_')[0];
-        waiterCode = waiterFullName.Split('_')[1];
-
-        <f2><split><center>СберЧаевые</center></split></f2>
-        <f1><split><center>Отсканируйте QR-код</center></split></f1>
-	<np />
-        <qrcode size="normal" correction="low">https://pay.mysbertips.ru/@waiterCode?sum=@fullSum?tcode=@order.Table.Number</qrcode>
-    }
-
-
-
     <center><split><whitespace-preserve>@Model.CommonInfo.CafeSetup.BillFooter</whitespace-preserve></split></center>
     <np />
     <np />
@@ -120,8 +198,6 @@
     <np />
     @* Footer (end) *@
 </doc>
-
-
 
 @helper Guests()
 {
@@ -321,7 +397,7 @@
 
                 @PrintOrderEntryAllergens(orderEntry)
                 @CategorizedDiscountsForOrderEntryGroup(new[] { orderEntry }, isPartOfCombo)
-            }
+            }            
         }
     }
 }
@@ -694,30 +770,5 @@
     private static decimal GetParentAmount(IOrderItem parent, bool onlyCommonModifiers)
     {
         return onlyCommonModifiers ? parent.Amount * 2 : parent.Amount;
-    }
-
-    private static decimal GetOrderSum(IOrder order)
-    {
-        var fullSum = order.GetFullSum() - order.DiscountItems.Where(di => !di.Type.PrintProductItemInPrecheque).Sum(di => di.GetDiscountSum());
-        var categorizedDiscountItems = new List<IDiscountItem>();
-        var nonCategorizedDiscountItems = new List<IDiscountItem>();
-
-        foreach (var discountItem in order.DiscountItems.Where(di => di.Type.PrintProductItemInPrecheque && di.DiscountSums.Count > 0))
-        {
-            if (discountItem.IsCategorized)
-            {
-                categorizedDiscountItems.Add(discountItem);
-            }
-            else
-            {
-                nonCategorizedDiscountItems.Add(discountItem);
-            }
-        }
-
-        var subTotal = fullSum - categorizedDiscountItems.Sum(di => di.GetDiscountSum());
-        var totalWithoutDiscounts = subTotal - nonCategorizedDiscountItems.Sum(di => di.GetDiscountSum());
-        var prepay = order.PrePayments.Sum(prepayItem => prepayItem.Sum);
-        var total = Math.Max(totalWithoutDiscounts + order.GetVatSumExcludedFromPrice() - prepay, 0m);
-        return total;
     }
 }
